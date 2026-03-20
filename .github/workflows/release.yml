@@ -118,13 +118,12 @@ jobs:
 
           # ── Contributors (Name + @username) ──────────────
           # Uses the commits API which maps git emails to GitHub accounts.
-          # Deduplicates by login so the same person with different git
-          # names (e.g., "Dopey" and "ThePrimeJnr") appears only once.
-          # Strips control chars from API response (commit messages with
-          # newlines cause jq parse errors otherwise).
-          CONTRIBUTORS=$(gh api "repos/${GITHUB_REPOSITORY}/commits?per_page=100&sha=${TAG}" 2>/dev/null | \
-            tr -d '\000-\011\013\014\016-\037' | \
-            jq -r '[.[] | select(.author != null) | select(.author.login != "dependabot[bot]") | select(.author.login != "web-flow") | {login: .author.login, name: .commit.author.name}] | unique_by(.login) | .[] | "- **\(.name)** ([@\(.login)](https://github.com/\(.login)))"' \
+          # Deduplicates by login so "Dopey" + "ThePrimeJnr" = one entry.
+          # Uses HEAD SHA (not tag name) to avoid API race conditions.
+          HEAD_SHA=$(git rev-parse HEAD)
+
+          CONTRIBUTORS=$(gh api "repos/${GITHUB_REPOSITORY}/commits?per_page=100&sha=${HEAD_SHA}" \
+            --jq '[.[] | select(.author != null) | select(.author.login != "dependabot[bot]") | select(.author.login != "web-flow") | {login: .author.login, name: .commit.author.name}] | unique_by(.login) | .[] | "- **\(.name)** ([@\(.login)](https://github.com/\(.login)))"' \
             2>/dev/null || echo "")
 
           if [ -z "$CONTRIBUTORS" ]; then
