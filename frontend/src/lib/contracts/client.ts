@@ -22,9 +22,12 @@ export interface TransactionResult {
  * Common helper to wait for transaction completion
  */
 export async function pollTransaction(txHash: string): Promise<rpc.Api.GetTransactionResponse> {
+  const MAX_POLLS = 30;
+  let attempts = 0;
   let response = await server.getTransaction(txHash);
   
   while (response.status === "NOT_FOUND") {
+    if (++attempts >= MAX_POLLS) throw new Error("Transaction not found after 30s");
     await new Promise(resolve => setTimeout(resolve, 1000));
     response = await server.getTransaction(txHash);
   }
