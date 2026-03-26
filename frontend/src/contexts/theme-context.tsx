@@ -1,9 +1,6 @@
 import { useState, useEffect, useCallback } from "react"
 import type { ReactNode } from "react"
-import { ThemeContext, useTheme } from "./ThemeContext"
-import type { Theme } from "./ThemeContext"
-
-export { useTheme }
+import { ThemeContext, type Theme } from "./theme"
 
 function getInitialTheme(): Theme {
   try {

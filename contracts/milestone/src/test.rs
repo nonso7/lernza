@@ -70,6 +70,7 @@ fn create_ms(
         &String::from_str(env, title),
         &String::from_str(env, "Description"),
         &reward,
+        &false,
     )
 }
 
@@ -135,6 +136,38 @@ fn test_get_milestones() {
 }
 
 #[test]
+fn test_list_milestones_empty() {
+    let (env, client, quest_client, owner) = setup();
+    let q_id = create_quest(&env, &quest_client, &owner);
+
+    let milestones = client.list_milestones(&q_id);
+    assert_eq!(milestones.len(), 0);
+    assert_eq!(client.get_milestone_count(&q_id), 0);
+
+    let _ = env;
+}
+
+#[test]
+fn test_list_milestones_with_milestones() {
+    let (env, client, quest_client, owner) = setup();
+    let q_id = create_quest(&env, &quest_client, &owner);
+    create_ms(&env, &client, &owner, q_id, "A", 10);
+    create_ms(&env, &client, &owner, q_id, "B", 20);
+
+    let milestones = client.list_milestones(&q_id);
+    assert_eq!(milestones.len(), 2);
+    assert_eq!(
+        milestones.get(0).unwrap().title,
+        String::from_str(&env, "A")
+    );
+    assert_eq!(
+        milestones.get(1).unwrap().title,
+        String::from_str(&env, "B")
+    );
+    assert_eq!(client.get_milestone_count(&q_id), 2);
+}
+
+#[test]
 fn test_verify_completion() {
     let (env, client, quest_client, owner) = setup();
     let q_id = create_quest(&env, &quest_client, &owner);
@@ -148,6 +181,31 @@ fn test_verify_completion() {
     assert_eq!(reward, 100);
     assert!(client.is_completed(&q_id, &0, &enrollee));
     assert_eq!(client.get_enrollee_completions(&q_id, &enrollee), 1);
+}
+
+#[test]
+fn test_verify_completion_requires_previous() {
+    let (env, client, quest_client, owner) = setup();
+    let q_id = create_quest(&env, &quest_client, &owner);
+    create_ms(&env, &client, &owner, q_id, "Task 1", 50);
+    let sequential_id = client.create_milestone(
+        &owner,
+        &q_id,
+        &String::from_str(&env, "Task 2"),
+        &String::from_str(&env, "Description"),
+        &100,
+        &true,
+    );
+
+    let enrollee = Address::generate(&env);
+    quest_client.add_enrollee(&q_id, &enrollee);
+
+    let blocked = client.try_verify_completion(&owner, &q_id, &sequential_id, &enrollee);
+    assert_eq!(blocked, Err(Ok(Error::MilestoneNotUnlocked)));
+
+    client.verify_completion(&owner, &q_id, &0, &enrollee);
+    let reward = client.verify_completion(&owner, &q_id, &sequential_id, &enrollee);
+    assert_eq!(reward, 100);
 }
 
 #[test]
@@ -211,6 +269,7 @@ fn test_wrong_owner_cannot_create() {
         &String::from_str(&env, "Evil task"),
         &String::from_str(&env, "Hack"),
         &999,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::OwnerMismatch)));
 }
@@ -243,6 +302,7 @@ fn test_zero_reward_milestone() {
         &String::from_str(&env, "Free task"),
         &String::from_str(&env, "Description"),
         &0,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
@@ -380,6 +440,7 @@ fn test_milestone_ownership_race_condition() {
         &String::from_str(&env, "Attacker backdoor milestone"),
         &String::from_str(&env, "Description"),
         &9999,
+        &false,
     );
 
     // Attack fails — attacker is not the quest owner
@@ -392,6 +453,7 @@ fn test_milestone_ownership_race_condition() {
         &String::from_str(&env, "Real milestone"),
         &String::from_str(&env, "Description"),
         &100,
+        &false,
     );
     assert_eq!(id, 0);
 
@@ -434,6 +496,7 @@ fn test_get_quest_not_found_fails() {
         &String::from_str(&env, "Title"),
         &String::from_str(&env, "Desc"),
         &100,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::NotFound)));
 }
@@ -538,6 +601,36 @@ fn test_approve_completion_multiple_approvals() {
     assert!(result2.is_some());
     assert_eq!(result2.unwrap(), 100);
     assert!(client.is_completed(&q_id, &0, &enrollee));
+}
+
+#[test]
+fn test_peer_review_respects_sequential_unlocks() {
+    let (env, client, quest_client, owner) = setup();
+    let q_id = create_quest(&env, &quest_client, &owner);
+    create_ms(&env, &client, &owner, q_id, "Task 1", 50);
+    client.create_milestone(
+        &owner,
+        &q_id,
+        &String::from_str(&env, "Task 2"),
+        &String::from_str(&env, "Description"),
+        &100,
+        &true,
+    );
+
+    client.set_verification_mode(&owner, &q_id, &VerificationMode::PeerReview(1));
+
+    let enrollee = Address::generate(&env);
+    let peer = Address::generate(&env);
+    quest_client.add_enrollee(&q_id, &enrollee);
+    quest_client.add_enrollee(&q_id, &peer);
+
+    client.submit_for_review(&enrollee, &q_id, &1);
+    let blocked = client.try_approve_completion(&peer, &q_id, &1, &enrollee);
+    assert_eq!(blocked, Err(Ok(Error::MilestoneNotUnlocked)));
+
+    client.verify_completion(&owner, &q_id, &0, &enrollee);
+    let approved = client.approve_completion(&peer, &q_id, &1, &enrollee);
+    assert_eq!(approved, Some(100));
 }
 
 #[test]
@@ -673,6 +766,7 @@ fn test_create_milestone_empty_title() {
         &String::from_str(&env, ""),
         &String::from_str(&env, "Valid description"),
         &100,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
@@ -687,6 +781,7 @@ fn test_create_milestone_empty_description() {
         &String::from_str(&env, "Valid Title"),
         &String::from_str(&env, ""),
         &100,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
@@ -703,6 +798,7 @@ fn test_create_milestone_very_long_title() {
         &long_title,
         &String::from_str(&env, "Valid description"),
         &100,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::TitleTooLong)));
 }
@@ -719,6 +815,7 @@ fn test_create_milestone_very_long_description() {
         &String::from_str(&env, "Valid Title"),
         &long_desc,
         &100,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::DescriptionTooLong)));
 }
@@ -733,6 +830,7 @@ fn test_create_milestone_negative_reward() {
         &String::from_str(&env, "Valid Title"),
         &String::from_str(&env, "Valid description"),
         &-1,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
@@ -747,6 +845,7 @@ fn test_create_milestone_zero_reward() {
         &String::from_str(&env, "Valid Title"),
         &String::from_str(&env, "Valid description"),
         &0,
+        &false,
     );
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
@@ -763,6 +862,7 @@ fn test_create_milestone_max_length_title_succeeds() {
         &max_title,
         &String::from_str(&env, "Valid description"),
         &100,
+        &false,
     );
     assert_eq!(id, 0);
 }
@@ -779,6 +879,7 @@ fn test_create_milestone_max_length_description_succeeds() {
         &String::from_str(&env, "Valid Title"),
         &max_desc,
         &100,
+        &false,
     );
     assert_eq!(id, 0);
 }
@@ -793,11 +894,13 @@ fn test_create_milestones_batch_success() {
         title: String::from_str(&env, "M1"),
         description: String::from_str(&env, "D1"),
         reward_amount: 100,
+        requires_previous: false,
     });
     milestones.push_back(MilestoneInput {
         title: String::from_str(&env, "M2"),
         description: String::from_str(&env, "D2"),
         reward_amount: 200,
+        requires_previous: true,
     });
 
     let ids = client.create_milestones_batch(&owner, &q_id, &milestones);
@@ -824,6 +927,7 @@ fn test_create_milestones_batch_oversized_rejection() {
             title: String::from_str(&env, "M"),
             description: String::from_str(&env, "D"),
             reward_amount: 100,
+            requires_previous: false,
         });
     }
 
@@ -841,11 +945,13 @@ fn test_create_milestones_batch_atomic_validation() {
         title: String::from_str(&env, "Valid"),
         description: String::from_str(&env, "Valid"),
         reward_amount: 100,
+        requires_previous: false,
     });
     milestones.push_back(MilestoneInput {
         title: String::from_str(&env, ""), // INVALID
         description: String::from_str(&env, "Valid"),
         reward_amount: 100,
+        requires_previous: false,
     });
 
     let result = client.try_create_milestones_batch(&owner, &q_id, &milestones);
