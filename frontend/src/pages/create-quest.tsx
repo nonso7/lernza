@@ -26,9 +26,7 @@ import { Badge } from "@/components/ui/badge"
 import { FieldError, FormLabel } from "@/components/ui/form-field"
 import { useWallet } from "@/hooks/use-wallet"
 import { useTransactionAction } from "@/hooks/use-transaction-action"
-import { useToast } from "@/hooks/use-toast"
 import { formatTokens, cn } from "@/lib/utils"
-import { useTokenMetadata } from "@/hooks/use-token-metadata"
 import { Visibility } from "@/lib/contract-types"
 import { questClient } from "@/lib/contracts/quest"
 import { rewardsClient } from "@/lib/contracts/rewards"
@@ -531,11 +529,6 @@ interface QuestPreviewModalProps {
 }
 
 function QuestPreviewModal({ isOpen, onClose, questData }: QuestPreviewModalProps) {
-  // Get token metadata for formatting - MUST be before any conditional returns
-  const tokenAddress =
-    import.meta.env.VITE_REWARDS_TOKEN_CONTRACT_ID || import.meta.env.VITE_USDC_TOKEN_ADDRESS || ""
-  const { metadata: tokenMetadata } = useTokenMetadata(tokenAddress)
-
   // Handle ESC key to close modal
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -556,13 +549,6 @@ function QuestPreviewModal({ isOpen, onClose, questData }: QuestPreviewModalProp
 
   // Calculate total reward
   const totalReward = questData.milestones.reduce((sum: number, m) => sum + m.rewardAmount, 0)
-
-  // Format amounts with token metadata
-  const formatRewardAmount = (amount: number) => {
-    return tokenMetadata
-      ? formatTokens(amount, tokenMetadata.decimals, tokenMetadata.symbol)
-      : formatTokens(amount)
-  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -625,7 +611,7 @@ function QuestPreviewModal({ isOpen, onClose, questData }: QuestPreviewModalProp
                     </div>
                   </div>
                   <Badge variant="default" className="flex-shrink-0 tabular-nums">
-                    {formatRewardAmount(milestone.rewardAmount)}
+                    {milestone.rewardAmount} USDC
                   </Badge>
                 </div>
               ))}
@@ -633,14 +619,19 @@ function QuestPreviewModal({ isOpen, onClose, questData }: QuestPreviewModalProp
           </div>
 
           {/* Reward Pool */}
-          <div className="bg-primary border-border mb-4 flex items-center justify-between border-[2px] p-4 shadow-[3px_3px_0_var(--color-border)]">
-            <div className="flex items-center gap-2">
-              <Coins className="h-5 w-5" />
-              <span className="font-black">Total {tokenMetadata?.symbol || "USDC"} needed</span>
+          <div className="bg-primary border-border border-[2px] p-4">
+            <h4 className="text-muted-foreground mb-3 text-xs font-black tracking-wider uppercase">
+              Reward Pool
+            </h4>
+            <div className="bg-primary border-border mb-4 flex items-center justify-between border-[2px] p-4 shadow-[3px_3px_0_var(--color-border)]">
+              <div className="flex items-center gap-2">
+                <Coins className="h-5 w-5" />
+                <span className="font-black">Total USDC needed</span>
+              </div>
+              <span className="text-xl font-black tabular-nums">
+                {formatTokens(totalReward)} USDC
+              </span>
             </div>
-            <span className="text-xl font-black tabular-nums">
-              {formatRewardAmount(totalReward)}
-            </span>
           </div>
 
           {/* Action Buttons */}
@@ -681,27 +672,16 @@ function Step3Review({
   const { isSupportedNetwork, address } = useWallet()
   const fundingTx = useTransactionAction()
   const createTx = useTransactionAction()
-  const { addToast } = useToast()
 
   const [questId, setQuestId] = useState<number | null>(null)
   const [createQuestTxHash, setCreateQuestTxHash] = useState<string | null>(null)
   const [fundTxHash, setFundTxHash] = useState<string | null>(null)
   const [showPreview, setShowPreview] = useState(false)
 
-  // Get token metadata for proper formatting
-  const tokenAddress =
-    import.meta.env.VITE_REWARDS_TOKEN_CONTRACT_ID || import.meta.env.VITE_USDC_TOKEN_ADDRESS || ""
-  const { metadata: tokenMetadata } = useTokenMetadata(tokenAddress)
-
   const totalReward = step2Data.milestones.reduce(
     (sum: number, m: z.infer<typeof milestoneSchema>) => sum + m.rewardAmount,
     0
   )
-
-  // Format total reward with token metadata
-  const formattedTotalReward = tokenMetadata
-    ? formatTokens(totalReward, tokenMetadata.decimals, tokenMetadata.symbol)
-    : formatTokens(totalReward)
 
   const parseQuestIdFromResultXdr = (resultXdr: string): number | null => {
     try {
@@ -750,7 +730,7 @@ function Step3Review({
       }
 
       setQuestId(createdQuestId)
-      setCreateQuestTxHash((createResult as { txHash: string }).txHash)
+      setCreateQuestTxHash(createResult.txHash)
 
       for (const [index, m] of step2Data.milestones.entries()) {
         const msResult = await milestoneClient.createMilestone(
@@ -771,24 +751,10 @@ function Step3Review({
       if (fundResult.status !== "SUCCESS") {
         throw new Error(fundResult.error ?? "Funding transaction failed")
       }
-      setFundTxHash((fundResult as { txHash: string }).txHash)
-      addToast(
-        <div className="flex flex-col gap-1">
-          <span>Reward pool funded successfully!</span>
-          <a
-            href={`https://stellar.expert/explorer/testnet/tx/${(fundResult as { txHash: string }).txHash}`}
-            target="_blank"
-            rel="noreferrer"
-            className="text-xs underline hover:opacity-80"
-          >
-            View on Stellar Expert
-          </a>
-        </div>,
-        "success"
-      )
+      setFundTxHash(fundResult.txHash)
       return {
         questId: createdQuestId,
-        createQuestTxHash: (createResult as { txHash: string }).txHash,
+        createQuestTxHash: createResult.txHash,
         fundTxHash: fundResult.txHash,
       }
     })
@@ -900,20 +866,6 @@ function Step3Review({
           }
         }
 
-        addToast(
-          <div className="flex flex-col gap-1">
-            <span>Quest created successfully!</span>
-            <a
-              href={`https://stellar.expert/explorer/testnet/tx/${(questResult as { txHash: string }).txHash}`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs underline hover:opacity-80"
-            >
-              View on Stellar Expert
-            </a>
-          </div>,
-          "success"
-        )
         return true
       } catch (error) {
         console.error("Quest creation error:", error)
@@ -975,9 +927,7 @@ function Step3Review({
                     </div>
                   </div>
                   <Badge variant="default" className="flex-shrink-0 tabular-nums">
-                    {tokenMetadata
-                      ? formatTokens(m.rewardAmount, tokenMetadata.decimals, tokenMetadata.symbol)
-                      : `${formatTokens(m.rewardAmount)} USDC`}
+                    {m.rewardAmount} USDC
                   </Badge>
                 </div>
               ))}
@@ -992,9 +942,11 @@ function Step3Review({
             <div className="bg-primary border-border mb-4 flex items-center justify-between border-[2px] p-4 shadow-[3px_3px_0_var(--color-border)]">
               <div className="flex items-center gap-2">
                 <Coins className="h-5 w-5" />
-                <span className="font-black">Total {tokenMetadata?.symbol || "USDC"} needed</span>
+                <span className="font-black">Total USDC needed</span>
               </div>
-              <span className="text-xl font-black tabular-nums">{formattedTotalReward}</span>
+              <span className="text-xl font-black tabular-nums">
+                {formatTokens(totalReward)} USDC
+              </span>
             </div>
 
             {/* Network Warning */}
@@ -1042,7 +994,7 @@ function Step3Review({
               ) : (
                 <>
                   <Coins className="h-4 w-4" />
-                  Fund Reward Pool ({formattedTotalReward})
+                  Fund Reward Pool ({formatTokens(totalReward)} USDC)
                 </>
               )}
             </Button>
@@ -1115,7 +1067,7 @@ function Step3Review({
         <Button
           type="button"
           variant="outline"
-          onClick={() => setShowPreview(true)}
+          onClick={handlePreviewClose}
           className="shimmer-on-hover"
         >
           <Eye className="h-4 w-4" />
