@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, type ChangeEvent } from "react"
+import { useCallback, useMemo, useState, useEffect, type ChangeEvent } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
@@ -43,6 +43,7 @@ import {
 } from "@/lib/utils"
 import { useInView, useCountUp } from "@/hooks/use-animations"
 import { useToast } from "@/hooks/use-toast"
+import { useTransactionQueue, type TransactionQueuePhase } from "@/hooks/use-transaction-queue"
 import { ToastContainer } from "@/components/toast"
 import { ShareButton } from "@/components/share-button"
 import { QuestMetadata } from "@/components/quest-metadata"
@@ -85,6 +86,14 @@ interface CompletionRecord {
   milestoneId: number
   enrollee: string
   completed: true
+}
+
+type QuestPendingTransactionType = "enroll" | "add_enrollee" | "verify_payout"
+
+interface QuestPendingTransactionMeta {
+  enrollee?: string
+  milestoneId?: number
+  amount?: bigint
 }
 
 const EMPTY_MILESTONES: MilestoneInfo[] = []
@@ -133,6 +142,10 @@ const truncateAddress = (address: string) => {
   return `${address.slice(0, 6)}...${address.slice(-4)}`
 }
 
+function getPendingLabel(phase: TransactionQueuePhase): string {
+  return phase === "confirming" ? "Confirming..." : "Awaiting Signature..."
+}
+
 export function QuestView() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -143,7 +156,6 @@ export function QuestView() {
   const [showAddEnrollee, setShowAddEnrollee] = useState(false)
   const [addPhase, setAddPhase] = useState<"idle" | "submitting" | "done" | "error">("idle")
   const [showMilestoneForm, setShowMilestoneForm] = useState(false)
-  const [activeMilestoneTxId, setActiveMilestoneTxId] = useState<number | null>(null)
 
   const { toasts, addToast, removeToast } = useToast()
   const { address, isSupportedNetwork } = useWallet()
@@ -154,6 +166,10 @@ export function QuestView() {
   const verifyPayoutTx = useTransactionAction()
   const removeEnrolleeTx = useTransactionAction()
   const archiveQuestTx = useTransactionAction()
+  const transactionQueue = useTransactionQueue<
+    QuestPendingTransactionType,
+    QuestPendingTransactionMeta
+  >()
   const [nowMs, setNowMs] = useState(Date.now())
 
   // Transaction confirmation dialog state
@@ -264,8 +280,72 @@ export function QuestView() {
   // Get raw data
   const quest = questData.data
   const milestones = milestonesData.data ?? EMPTY_MILESTONES
-  const enrollees = enrolleesData.data ?? EMPTY_ENROLLEES
-  const poolBalance = poolBalanceData.data ?? BigInt(0)
+  const baseEnrollees = enrolleesData.data ?? EMPTY_ENROLLEES
+  const basePoolBalance = poolBalanceData.data ?? BigInt(0)
+
+  const pendingEnrollmentTransactions = useMemo(
+    () =>
+      transactionQueue.transactions.filter(
+        transaction =>
+          (transaction.type === "enroll" || transaction.type === "add_enrollee") &&
+          transaction.meta.enrollee
+      ),
+    [transactionQueue.transactions]
+  )
+  const pendingVerificationTransactions = useMemo(
+    () =>
+      transactionQueue.transactions.filter(
+        transaction => transaction.type === "verify_payout" && transaction.meta.enrollee
+      ),
+    [transactionQueue.transactions]
+  )
+
+  const enrollees = useMemo(() => {
+    const merged = [...baseEnrollees]
+    for (const transaction of pendingEnrollmentTransactions) {
+      const enrollee = transaction.meta.enrollee
+      if (enrollee && !merged.includes(enrollee)) {
+        merged.push(enrollee)
+      }
+    }
+    return merged
+  }, [baseEnrollees, pendingEnrollmentTransactions])
+
+  const completionsWithOptimisticUpdates = useMemo(() => {
+    const merged = [...completions]
+    for (const transaction of pendingVerificationTransactions) {
+      const enrollee = transaction.meta.enrollee
+      const milestoneId = transaction.meta.milestoneId
+      if (
+        enrollee &&
+        milestoneId !== undefined &&
+        !merged.some(
+          completion => completion.enrollee === enrollee && completion.milestoneId === milestoneId
+        )
+      ) {
+        merged.push({
+          milestoneId,
+          enrollee,
+          completed: true,
+        })
+      }
+    }
+    return merged
+  }, [completions, pendingVerificationTransactions])
+
+  const poolBalance =
+    basePoolBalance -
+    pendingVerificationTransactions.reduce(
+      (sum, transaction) => sum + (transaction.meta.amount ?? 0n),
+      0n
+    )
+
+  const pendingEnrollmentPhaseByAddress = new Map<string, TransactionQueuePhase>()
+  for (const transaction of pendingEnrollmentTransactions) {
+    if (transaction.meta.enrollee) {
+      pendingEnrollmentPhaseByAddress.set(transaction.meta.enrollee, transaction.phase)
+    }
+  }
 
   const isOwner = !!address && quest?.owner === address
   const isEnrolled = !!address && enrollees.includes(address)
@@ -277,12 +357,12 @@ export function QuestView() {
   const countdownLabel = quest && expiringSoon ? formatCountdown(quest.deadline, nowMs) : null
 
   const viewerCompletedMilestoneIds = new Set(
-    completions
+    completionsWithOptimisticUpdates
       .filter(completion => completion.enrollee === address)
       .map(completion => completion.milestoneId)
   )
   const completedMilestones = isOwner
-    ? new Set(completions.map(completion => completion.milestoneId)).size
+    ? new Set(completionsWithOptimisticUpdates.map(completion => completion.milestoneId)).size
     : viewerCompletedMilestoneIds.size
   const earnedReward = isOwner
     ? 0
@@ -306,6 +386,7 @@ export function QuestView() {
     0
   )
   const totalRewardCount = useCountUp(totalRewardEarly, 800, statsInView)
+  const selfEnrollmentPhase = address ? pendingEnrollmentPhaseByAddress.get(address) : undefined
 
   // Define all callbacks BEFORE any conditional returns
 
@@ -369,13 +450,13 @@ export function QuestView() {
 
   const isMilestoneCompletedBy = useCallback(
     (milestoneId: number, enrollee: string) =>
-      completions.some(
+      completionsWithOptimisticUpdates.some(
         completion =>
           completion.completed &&
           completion.milestoneId === milestoneId &&
           completion.enrollee === enrollee
       ),
-    [completions]
+    [completionsWithOptimisticUpdates]
   )
 
   const isMilestoneUnlockedForEnrollee = useCallback(
@@ -485,9 +566,24 @@ export function QuestView() {
       }
 
       setAddPhase("submitting")
+      const queuedTransactionId = transactionQueue.enqueue({
+        type: "add_enrollee",
+        label: "Add enrollee",
+        phase: "signing",
+        meta: { enrollee: values.address },
+      })
+
       try {
-        await addEnrolleeTx.run(async () => {
-          const result = await questClient.addEnrollee(address, questId, values.address)
+        await addEnrolleeTx.run(async ({ onSubmitted }) => {
+          const result = await questClient.addEnrollee(address, questId, values.address, {
+            onSubmitted: txHash => {
+              transactionQueue.update(queuedTransactionId, {
+                phase: "confirming",
+                txHash,
+              })
+              onSubmitted?.(txHash)
+            },
+          })
           if (result.status !== "SUCCESS") {
             throw new Error(
               getQuestErrorMessage(result.error ?? "Transaction failed. Please try again.")
@@ -497,10 +593,12 @@ export function QuestView() {
         })
 
         await refetch()
+        transactionQueue.remove(queuedTransactionId)
         setAddPhase("done")
         addToast("Enrollee added successfully.", "success")
         setTimeout(closeAddEnrollee, 1500)
       } catch (err: unknown) {
+        transactionQueue.remove(queuedTransactionId)
         setAddPhase("error")
         const message = err instanceof Error ? err.message : "Transaction failed. Please try again."
         enrolleeForm.setError("address", { message })
@@ -517,6 +615,7 @@ export function QuestView() {
       isExpired,
       questId,
       refetch,
+      transactionQueue,
     ]
   )
 
@@ -530,9 +629,24 @@ export function QuestView() {
       return
     }
 
+    const queuedTransactionId = transactionQueue.enqueue({
+      type: "enroll",
+      label: "Enroll in quest",
+      phase: "signing",
+      meta: { enrollee: address },
+    })
+
     try {
-      await enrollTx.run(async () => {
-        const result = await questClient.addEnrollee(questId, address)
+      await enrollTx.run(async ({ onSubmitted }) => {
+        const result = await questClient.addEnrollee(questId, address, {
+          onSubmitted: txHash => {
+            transactionQueue.update(queuedTransactionId, {
+              phase: "confirming",
+              txHash,
+            })
+            onSubmitted?.(txHash)
+          },
+        })
         if (result.status !== "SUCCESS") {
           throw new Error(getQuestErrorMessage(result.error ?? "Enrollment failed."))
         }
@@ -540,8 +654,10 @@ export function QuestView() {
       })
 
       await refetch()
+      transactionQueue.remove(queuedTransactionId)
       addToast("Enrollment confirmed.", "success")
     } catch (err: unknown) {
+      transactionQueue.remove(queuedTransactionId)
       const message =
         err instanceof Error
           ? getQuestErrorMessage(err.message)
@@ -558,6 +674,7 @@ export function QuestView() {
     quest?.visibility,
     questId,
     refetch,
+    transactionQueue,
   ])
 
   const handleVerifyAndPayout = useCallback(
@@ -603,14 +720,32 @@ export function QuestView() {
           description: `Verify completion and distribute ${formatTokens(toSafeNumber(milestone.rewardAmount))} USDC to ${truncateAddress(target)}.`,
         },
         execute: async () => {
-          setActiveMilestoneTxId(milestone.id)
+          const queuedTransactionId = transactionQueue.enqueue({
+            type: "verify_payout",
+            label: "Verify completion",
+            phase: "signing",
+            meta: {
+              enrollee: target,
+              milestoneId: milestone.id,
+              amount: milestone.rewardAmount,
+            },
+          })
           try {
-            const result = await verifyPayoutTx.run(async () => {
+            const result = await verifyPayoutTx.run(async ({ onSubmitted }) => {
               const verifyResult = await milestoneClient.verifyCompletion(
                 address,
                 questId,
                 milestone.id,
-                target
+                target,
+                {
+                  onSubmitted: txHash => {
+                    transactionQueue.update(queuedTransactionId, {
+                      phase: "confirming",
+                      txHash,
+                    })
+                    onSubmitted?.(txHash)
+                  },
+                }
               )
               if (verifyResult.status !== "SUCCESS") {
                 throw new Error(
@@ -624,7 +759,16 @@ export function QuestView() {
                 questId,
                 milestone.id,
                 target,
-                payoutAmount
+                payoutAmount,
+                {
+                  onSubmitted: txHash => {
+                    transactionQueue.update(queuedTransactionId, {
+                      phase: "confirming",
+                      txHash,
+                    })
+                    onSubmitted?.(txHash)
+                  },
+                }
               )
               if (payoutResult.status !== "SUCCESS") {
                 throw new Error(payoutResult.error ?? "Reward distribution failed.")
@@ -634,15 +778,15 @@ export function QuestView() {
             })
 
             await refetch()
+            transactionQueue.remove(queuedTransactionId)
             addToast(
               `Completion verified! ${formatTokens(toSafeNumber(result.payoutAmount))} USDC paid out to learner.`,
               "success"
             )
           } catch (err: unknown) {
+            transactionQueue.remove(queuedTransactionId)
             const message = err instanceof Error ? err.message : "Verification failed."
             addToast(message, "error")
-          } finally {
-            setActiveMilestoneTxId(null)
           }
         },
       })
@@ -658,6 +802,7 @@ export function QuestView() {
       isMilestoneUnlockedForEnrollee,
       questId,
       refetch,
+      transactionQueue,
       verifyPayoutTx,
       isArchived,
       isExpired,
@@ -1044,10 +1189,10 @@ export function QuestView() {
                             : undefined
                   }
                 >
-                  {enrollTx.isPending ? (
+                  {selfEnrollmentPhase ? (
                     <>
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      Awaiting Signature...
+                      {getPendingLabel(selfEnrollmentPhase)}
                     </>
                   ) : isEnrolled ? (
                     <>
@@ -1094,6 +1239,23 @@ export function QuestView() {
           )}
         </div>
       </div>
+
+      {transactionQueue.transactions.length > 0 && (
+        <div className="bg-secondary border-border mb-6 border-[3px] p-4 shadow-[4px_4px_0_var(--color-border)]">
+          <p className="mb-2 text-xs font-black tracking-wider uppercase">Pending Transactions</p>
+          <div className="space-y-2">
+            {transactionQueue.transactions.map(transaction => (
+              <div
+                key={transaction.id}
+                className="border-border bg-background flex items-center justify-between border-[2px] px-3 py-2 text-xs font-bold"
+              >
+                <span>{transaction.label}</span>
+                <span>{getPendingLabel(transaction.phase)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {showAddEnrollee && isOwner && (
         <form
@@ -1148,7 +1310,7 @@ export function QuestView() {
                 {addEnrolleeTx.isPending ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Adding...
+                    {addEnrolleeTx.isConfirming ? "Confirming..." : "Awaiting Signature..."}
                   </>
                 ) : addPhase === "done" ? (
                   <>
@@ -1406,14 +1568,18 @@ export function QuestView() {
             </Card>
           ) : (
             milestones.map((milestone, index) => {
-              const completedBy = completions
+              const completedBy = completionsWithOptimisticUpdates
                 .filter(
                   completion => completion.milestoneId === milestone.id && completion.completed
                 )
                 .map(completion => completion.enrollee)
               const isCompleted = completedBy.length > 0
               const isExpanded = expandedMilestone === milestone.id
-              const isVerifying = verifyPayoutTx.isPending && activeMilestoneTxId === milestone.id
+              const pendingVerificationForMilestone = pendingVerificationTransactions.find(
+                transaction => transaction.meta.milestoneId === milestone.id
+              )
+              const verifyingPhase = pendingVerificationForMilestone?.phase
+              const isVerifying = Boolean(verifyingPhase)
               const eligibleEnrollees = getEligibleEnrollees(milestone)
               const lockedForViewer =
                 !isOwner &&
@@ -1564,7 +1730,7 @@ export function QuestView() {
                                     {isVerifying ? (
                                       <>
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                        Verifying & Paying...
+                                        {getPendingLabel(verifyingPhase ?? "signing")}
                                       </>
                                     ) : (
                                       <>
@@ -1640,7 +1806,7 @@ export function QuestView() {
                   {addEnrolleeTx.isPending ? (
                     <>
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      Inviting...
+                      {addEnrolleeTx.isConfirming ? "Confirming..." : "Awaiting Signature..."}
                     </>
                   ) : (
                     <>
@@ -1701,7 +1867,7 @@ export function QuestView() {
             </Card>
           ) : (
             enrollees.map((enrollee, index) => {
-              const completed = completions.filter(
+              const completed = completionsWithOptimisticUpdates.filter(
                 completion => completion.enrollee === enrollee && completion.completed
               ).length
               const earned = milestones
