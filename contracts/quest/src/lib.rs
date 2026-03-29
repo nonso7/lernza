@@ -6,8 +6,7 @@ use common::{
     extend_instance_ttl, is_contract_address, QuestInfo, QuestStatus, Visibility, BUMP, THRESHOLD,
 };
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec,
 };
 
 // Quest contract: the entry point for Lernza.
@@ -321,7 +320,8 @@ impl QuestContract {
         // Emit quest updated event
         // Event topics: (quest_updated,)
         // Event data: (quest_id)
-        env.events().publish((Symbol::new(&env, "quest_updated"),), quest_id);
+        env.events()
+            .publish((Symbol::new(&env, "quest_updated"),), quest_id);
 
         Self::bump(&env, quest_id);
         Ok(())
@@ -343,10 +343,8 @@ impl QuestContract {
         // Emit quest archived event
         // Event topics: (quest_archived,)
         // Event data: (quest_id)
-        env.events().publish(
-            (Symbol::new(&env, "quest_archived"),),
-            quest_id,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "quest_archived"),), quest_id);
 
         Self::bump(&env, quest_id);
         Ok(())
